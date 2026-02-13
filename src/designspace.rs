@@ -302,6 +302,11 @@ impl DesignSpaceDocument {
         quick_xml::de::from_reader(reader).map_err(DesignSpaceLoadError::DeError)
     }
 
+    /// Load a designspace from string contents.
+    pub fn load_str(contents: &str) -> Result<DesignSpaceDocument, DesignSpaceLoadError> {
+        quick_xml::de::from_str(contents).map_err(DesignSpaceLoadError::DeError)
+    }
+
     /// Save a designspace.
     pub fn save(&self, path: impl AsRef<Path>) -> Result<(), DesignSpaceSaveError> {
         let mut buf = String::from("<?xml version='1.0' encoding='UTF-8'?>\n");

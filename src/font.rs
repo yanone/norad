@@ -3,7 +3,9 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 
 use std::fs;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::{collections::BTreeMap, collections::HashMap};
 
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
@@ -210,6 +212,167 @@ impl Font {
         request: DataRequest,
     ) -> Result<Font, FontLoadError> {
         Self::load_impl(path.as_ref(), request)
+    }
+
+    /// Returns a [`Font`] object loaded from in-memory UFO entries.
+    ///
+    /// `path` is the virtual UFO root path (for example `MyFont.ufo` or `sources/MyFont.ufo`).
+    ///
+    /// `entries` should contain relative file paths and UTF-8 file contents.
+    pub fn load_entries(
+        path: impl AsRef<Path>,
+        entries: &HashMap<String, String>,
+    ) -> Result<Font, FontLoadError> {
+        let normalized_entries: HashMap<String, String> = entries
+            .iter()
+            .map(|(k, v)| (normalize_virtual_path(k).unwrap_or_else(|| k.clone()), v.clone()))
+            .collect();
+
+        let root = normalize_virtual_path(&path.as_ref().to_string_lossy())
+            .ok_or(FontLoadError::MissingMetaInfoFile)?;
+        let root = root.trim_end_matches('/').to_string();
+
+        let rooted_metainfo_key = join_virtual_path(&root, METAINFO_FILE);
+        let effective_root = if normalized_entries.contains_key(&rooted_metainfo_key) {
+            root.as_str()
+        } else {
+            ""
+        };
+
+        let metainfo_key = join_virtual_path(effective_root, METAINFO_FILE);
+        let metainfo_str = normalized_entries
+            .get(&metainfo_key)
+            .ok_or(FontLoadError::MissingMetaInfoFile)?;
+
+        let mut ufo = Font::new();
+        ufo.meta = plist::from_reader(Cursor::new(metainfo_str.as_bytes())).map_err(|source| {
+            FontLoadError::ParsePlist { name: METAINFO_FILE, source }
+        })?;
+
+        let fontinfo_key = join_virtual_path(effective_root, FONTINFO_FILE);
+        if let Some(fontinfo_str) = normalized_entries.get(&fontinfo_key) {
+            let mut fontinfo_value: plist::Value =
+                plist::from_reader(Cursor::new(fontinfo_str.as_bytes())).map_err(|source| {
+                    FontLoadError::ParsePlist { name: FONTINFO_FILE, source }
+                })?;
+
+            if let Some(dict) = fontinfo_value.as_dictionary_mut() {
+                if let Some(value) = dict.get_mut("openTypeOS2WinDescent") {
+                    if let Some(raw) = value.as_signed_integer() {
+                        if raw < 0 {
+                            *value = plist::Value::Integer((-raw).into());
+                        }
+                    }
+                }
+            }
+
+            ufo.font_info = plist::from_value(&fontinfo_value).map_err(|source| {
+                FontLoadError::ParsePlist { name: FONTINFO_FILE, source }
+            })?;
+        }
+
+        let lib_key = join_virtual_path(effective_root, LIB_FILE);
+        if let Some(lib_str) = normalized_entries.get(&lib_key) {
+            ufo.lib = plist::from_reader(Cursor::new(lib_str.as_bytes()))
+                .map_err(|source| FontLoadError::ParsePlist { name: LIB_FILE, source })?;
+        }
+
+        let groups_key = join_virtual_path(effective_root, GROUPS_FILE);
+        if let Some(groups_str) = normalized_entries.get(&groups_key) {
+            ufo.groups = plist::from_reader(Cursor::new(groups_str.as_bytes())).map_err(|source| {
+                FontLoadError::ParsePlist { name: GROUPS_FILE, source }
+            })?;
+            validate_groups(&ufo.groups).map_err(FontLoadError::InvalidGroups)?;
+        }
+
+        let kerning_key = join_virtual_path(effective_root, KERNING_FILE);
+        if let Some(kerning_str) = normalized_entries.get(&kerning_key) {
+            ufo.kerning = plist::from_reader(Cursor::new(kerning_str.as_bytes())).map_err(|source| {
+                FontLoadError::ParsePlist { name: KERNING_FILE, source }
+            })?;
+        }
+
+        let features_key = join_virtual_path(effective_root, FEATURES_FILE);
+        if let Some(features_str) = normalized_entries.get(&features_key) {
+            ufo.features = features_str.clone();
+        }
+
+        let layercontents_key = join_virtual_path(effective_root, LAYER_CONTENTS_FILE);
+        let layer_descriptors: Vec<(Name, PathBuf)> = if let Some(layercontents_str) =
+            normalized_entries.get(&layercontents_key)
+        {
+            plist::from_reader(Cursor::new(layercontents_str.as_bytes())).map_err(|source| {
+                FontLoadError::ParsePlist { name: LAYER_CONTENTS_FILE, source }
+            })?
+        } else {
+            vec![(Name::new_raw("public.default"), PathBuf::from("glyphs"))]
+        };
+
+        for (layer_name, layer_dir) in layer_descriptors {
+            let normalized_layer_dir = normalize_virtual_path(&layer_dir.to_string_lossy())
+                .unwrap_or_else(|| layer_dir.to_string_lossy().trim_matches('/').to_string());
+            let is_default_layer = normalized_layer_dir == "glyphs";
+
+            let layer = if is_default_layer {
+                ufo.default_layer_mut()
+            } else {
+                ufo.layers.get_or_create_layer(layer_name.as_str()).map_err(|_| FontLoadError::Layer {
+                    name: layer_name.to_string(),
+                    path: PathBuf::from(&normalized_layer_dir),
+                    source: Box::new(crate::error::LayerLoadError::MissingContentsFile),
+                })?
+            };
+
+            let contents_key = join_virtual_path(
+                &join_virtual_path(effective_root, &normalized_layer_dir),
+                "contents.plist",
+            );
+            let contents_str = normalized_entries.get(&contents_key).ok_or(FontLoadError::Layer {
+                name: layer_name.to_string(),
+                path: PathBuf::from(&normalized_layer_dir),
+                source: Box::new(crate::error::LayerLoadError::MissingContentsFile),
+            })?;
+
+            let glyph_files: BTreeMap<Name, PathBuf> =
+                plist::from_reader(Cursor::new(contents_str.as_bytes())).map_err(|source| {
+                    FontLoadError::Layer {
+                        name: layer_name.to_string(),
+                        path: PathBuf::from(&normalized_layer_dir),
+                        source: Box::new(crate::error::LayerLoadError::ParsePlist {
+                            name: "contents.plist",
+                            source,
+                        }),
+                    }
+                })?;
+
+            for (_glyph_name, glif_relative_path) in glyph_files {
+                let glif_key = join_virtual_path(
+                    &join_virtual_path(effective_root, &normalized_layer_dir),
+                    &glif_relative_path.to_string_lossy(),
+                );
+                let glif_contents =
+                    normalized_entries.get(&glif_key).ok_or(FontLoadError::Layer {
+                        name: layer_name.to_string(),
+                        path: glif_relative_path.clone(),
+                        source: Box::new(crate::error::LayerLoadError::MissingContentsFile),
+                    })?;
+                let mut glyph = Glyph::parse_raw(glif_contents.as_bytes()).map_err(|source| {
+                    FontLoadError::Layer {
+                        name: layer_name.to_string(),
+                        path: glif_relative_path.clone(),
+                        source: Box::new(crate::error::LayerLoadError::Glyph {
+                            name: glif_relative_path.to_string_lossy().to_string(),
+                            path: glif_relative_path.clone(),
+                            source,
+                        }),
+                    }
+                })?;
+                glyph.name = Name::new_raw(&glyph.name);
+                layer.insert_glyph(glyph);
+            }
+        }
+
+        Ok(ufo)
     }
 
     fn load_impl(path: &Path, request: DataRequest) -> Result<Font, FontLoadError> {
@@ -606,6 +769,33 @@ impl Font {
     }
 }
 
+fn normalize_virtual_path(path: &str) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for component in Path::new(path).components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(part) => {
+                parts.push(part.to_string_lossy().into_owned());
+            }
+            std::path::Component::ParentDir => {
+                parts.pop()?;
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => return None,
+        }
+    }
+    Some(parts.join("/"))
+}
+
+fn join_virtual_path(base: &str, rel: &str) -> String {
+    if base.is_empty() {
+        rel.to_string()
+    } else {
+        let trimmed_base = base.trim_end_matches('/');
+        let trimmed_rel = rel.trim_start_matches('/');
+        format!("{}/{}", trimmed_base, trimmed_rel)
+    }
+}
+
 fn load_lib(lib_path: &Path) -> Result<plist::Dictionary, FontLoadError> {
     plist::Value::from_file(lib_path)
         .map_err(|source| FontLoadError::ParsePlist { name: LIB_FILE, source })?
@@ -656,6 +846,7 @@ fn load_layer_set(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::ops::Deref;
 
     use tempfile::TempDir;
@@ -702,6 +893,95 @@ mod tests {
         }
 
         assert_eq!(font_obj.features, "# this is the feature from lightWide\n");
+    }
+
+    #[test]
+    fn loading_entries() {
+        let mut entries = HashMap::new();
+        entries.insert(
+            "metainfo.plist".to_string(),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>creator</key><string>org.test</string><key>formatVersion</key><integer>3</integer></dict></plist>"#
+                .to_string(),
+        );
+        entries.insert(
+            "fontinfo.plist".to_string(),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>familyName</key><string>TestFamily</string><key>styleName</key><string>Regular</string></dict></plist>"#
+                .to_string(),
+        );
+        entries.insert(
+            "layercontents.plist".to_string(),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><array><array><string>public.default</string><string>glyphs</string></array></array></plist>"#
+                .to_string(),
+        );
+        entries.insert(
+            "glyphs/contents.plist".to_string(),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>A</key><string>A_.glif</string></dict></plist>"#
+                .to_string(),
+        );
+        entries.insert(
+            "glyphs/A_.glif".to_string(),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<glyph name="A" format="2">
+  <advance width="600"/>
+</glyph>"#
+                .to_string(),
+        );
+
+        let font = Font::load_entries("Test.ufo", &entries).unwrap();
+        assert_eq!(font.default_layer().len(), 1);
+        assert!(font.default_layer().get_glyph("A").is_some());
+    }
+
+    #[test]
+    fn loading_entries_negative_os2_win_descent() {
+        let mut entries = HashMap::new();
+        entries.insert(
+            "metainfo.plist".to_string(),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>creator</key><string>org.test</string><key>formatVersion</key><integer>3</integer></dict></plist>"#
+                .to_string(),
+        );
+        entries.insert(
+            "fontinfo.plist".to_string(),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>familyName</key><string>TestFamily</string><key>styleName</key><string>Regular</string><key>openTypeOS2WinDescent</key><integer>-279</integer></dict></plist>"#
+                .to_string(),
+        );
+        entries.insert(
+            "layercontents.plist".to_string(),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><array><array><string>public.default</string><string>glyphs</string></array></array></plist>"#
+                .to_string(),
+        );
+        entries.insert(
+            "glyphs/contents.plist".to_string(),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>A</key><string>A_.glif</string></dict></plist>"#
+                .to_string(),
+        );
+        entries.insert(
+            "glyphs/A_.glif".to_string(),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<glyph name="A" format="2">
+  <advance width="600"/>
+</glyph>"#
+                .to_string(),
+        );
+
+        let font = Font::load_entries("Test.ufo", &entries).unwrap();
+        assert_eq!(font.font_info.open_type_os2_win_descent, Some(279));
     }
 
     #[test]
