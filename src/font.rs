@@ -251,24 +251,11 @@ impl Font {
 
         let fontinfo_key = join_virtual_path(effective_root, FONTINFO_FILE);
         if let Some(fontinfo_str) = normalized_entries.get(&fontinfo_key) {
-            let mut fontinfo_value: plist::Value =
-                plist::from_reader(Cursor::new(fontinfo_str.as_bytes())).map_err(|source| {
-                    FontLoadError::ParsePlist { name: FONTINFO_FILE, source }
-                })?;
-
-            if let Some(dict) = fontinfo_value.as_dictionary_mut() {
-                if let Some(value) = dict.get_mut("openTypeOS2WinDescent") {
-                    if let Some(raw) = value.as_signed_integer() {
-                        if raw < 0 {
-                            *value = plist::Value::Integer((-raw).into());
-                        }
-                    }
-                }
-            }
-
-            ufo.font_info = plist::from_value(&fontinfo_value).map_err(|source| {
+            ufo.font_info = plist::from_reader(Cursor::new(fontinfo_str.as_bytes())).map_err(
+                |source| {
                 FontLoadError::ParsePlist { name: FONTINFO_FILE, source }
-            })?;
+            },
+            )?;
         }
 
         let lib_key = join_virtual_path(effective_root, LIB_FILE);
@@ -941,7 +928,7 @@ mod tests {
     }
 
     #[test]
-    fn loading_entries_negative_os2_win_descent() {
+    fn loading_entries_negative_os2_win_descent_fails() {
         let mut entries = HashMap::new();
         entries.insert(
             "metainfo.plist".to_string(),
@@ -980,8 +967,11 @@ mod tests {
                 .to_string(),
         );
 
-        let font = Font::load_entries("Test.ufo", &entries).unwrap();
-        assert_eq!(font.font_info.open_type_os2_win_descent, Some(279));
+        let result = Font::load_entries("Test.ufo", &entries);
+        let Err(FontLoadError::ParsePlist { name, .. }) = result else {
+            panic!("expected ParsePlist error for fontinfo.plist")
+        };
+        assert_eq!(name, FONTINFO_FILE);
     }
 
     #[test]
