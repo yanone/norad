@@ -233,29 +233,21 @@ impl Font {
         let root = root.trim_end_matches('/').to_string();
 
         let rooted_metainfo_key = join_virtual_path(&root, METAINFO_FILE);
-        let effective_root = if normalized_entries.contains_key(&rooted_metainfo_key) {
-            root.as_str()
-        } else {
-            ""
-        };
+        let effective_root =
+            if normalized_entries.contains_key(&rooted_metainfo_key) { root.as_str() } else { "" };
 
         let metainfo_key = join_virtual_path(effective_root, METAINFO_FILE);
-        let metainfo_str = normalized_entries
-            .get(&metainfo_key)
-            .ok_or(FontLoadError::MissingMetaInfoFile)?;
+        let metainfo_str =
+            normalized_entries.get(&metainfo_key).ok_or(FontLoadError::MissingMetaInfoFile)?;
 
         let mut ufo = Font::new();
-        ufo.meta = plist::from_reader(Cursor::new(metainfo_str.as_bytes())).map_err(|source| {
-            FontLoadError::ParsePlist { name: METAINFO_FILE, source }
-        })?;
+        ufo.meta = plist::from_reader(Cursor::new(metainfo_str.as_bytes()))
+            .map_err(|source| FontLoadError::ParsePlist { name: METAINFO_FILE, source })?;
 
         let fontinfo_key = join_virtual_path(effective_root, FONTINFO_FILE);
         if let Some(fontinfo_str) = normalized_entries.get(&fontinfo_key) {
-            ufo.font_info = plist::from_reader(Cursor::new(fontinfo_str.as_bytes())).map_err(
-                |source| {
-                FontLoadError::ParsePlist { name: FONTINFO_FILE, source }
-            },
-            )?;
+            ufo.font_info = plist::from_reader(Cursor::new(fontinfo_str.as_bytes()))
+                .map_err(|source| FontLoadError::ParsePlist { name: FONTINFO_FILE, source })?;
         }
 
         let lib_key = join_virtual_path(effective_root, LIB_FILE);
@@ -266,17 +258,15 @@ impl Font {
 
         let groups_key = join_virtual_path(effective_root, GROUPS_FILE);
         if let Some(groups_str) = normalized_entries.get(&groups_key) {
-            ufo.groups = plist::from_reader(Cursor::new(groups_str.as_bytes())).map_err(|source| {
-                FontLoadError::ParsePlist { name: GROUPS_FILE, source }
-            })?;
+            ufo.groups = plist::from_reader(Cursor::new(groups_str.as_bytes()))
+                .map_err(|source| FontLoadError::ParsePlist { name: GROUPS_FILE, source })?;
             validate_groups(&ufo.groups).map_err(FontLoadError::InvalidGroups)?;
         }
 
         let kerning_key = join_virtual_path(effective_root, KERNING_FILE);
         if let Some(kerning_str) = normalized_entries.get(&kerning_key) {
-            ufo.kerning = plist::from_reader(Cursor::new(kerning_str.as_bytes())).map_err(|source| {
-                FontLoadError::ParsePlist { name: KERNING_FILE, source }
-            })?;
+            ufo.kerning = plist::from_reader(Cursor::new(kerning_str.as_bytes()))
+                .map_err(|source| FontLoadError::ParsePlist { name: KERNING_FILE, source })?;
         }
 
         let features_key = join_virtual_path(effective_root, FEATURES_FILE);
@@ -288,9 +278,8 @@ impl Font {
         let layer_descriptors: Vec<(Name, PathBuf)> = if let Some(layercontents_str) =
             normalized_entries.get(&layercontents_key)
         {
-            plist::from_reader(Cursor::new(layercontents_str.as_bytes())).map_err(|source| {
-                FontLoadError::ParsePlist { name: LAYER_CONTENTS_FILE, source }
-            })?
+            plist::from_reader(Cursor::new(layercontents_str.as_bytes()))
+                .map_err(|source| FontLoadError::ParsePlist { name: LAYER_CONTENTS_FILE, source })?
         } else {
             vec![(Name::new_raw("public.default"), PathBuf::from("glyphs"))]
         };
@@ -303,10 +292,12 @@ impl Font {
             let layer = if is_default_layer {
                 ufo.default_layer_mut()
             } else {
-                ufo.layers.get_or_create_layer(layer_name.as_str()).map_err(|_| FontLoadError::Layer {
-                    name: layer_name.to_string(),
-                    path: PathBuf::from(&normalized_layer_dir),
-                    source: Box::new(crate::error::LayerLoadError::MissingContentsFile),
+                ufo.layers.get_or_create_layer(layer_name.as_str()).map_err(|_| {
+                    FontLoadError::Layer {
+                        name: layer_name.to_string(),
+                        path: PathBuf::from(&normalized_layer_dir),
+                        source: Box::new(crate::error::LayerLoadError::MissingContentsFile),
+                    }
                 })?
             };
 
@@ -314,11 +305,12 @@ impl Font {
                 &join_virtual_path(effective_root, &normalized_layer_dir),
                 "contents.plist",
             );
-            let contents_str = normalized_entries.get(&contents_key).ok_or(FontLoadError::Layer {
-                name: layer_name.to_string(),
-                path: PathBuf::from(&normalized_layer_dir),
-                source: Box::new(crate::error::LayerLoadError::MissingContentsFile),
-            })?;
+            let contents_str =
+                normalized_entries.get(&contents_key).ok_or(FontLoadError::Layer {
+                    name: layer_name.to_string(),
+                    path: PathBuf::from(&normalized_layer_dir),
+                    source: Box::new(crate::error::LayerLoadError::MissingContentsFile),
+                })?;
 
             let glyph_files: BTreeMap<Name, PathBuf> =
                 plist::from_reader(Cursor::new(contents_str.as_bytes())).map_err(|source| {
