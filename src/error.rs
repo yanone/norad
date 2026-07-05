@@ -150,6 +150,29 @@ pub enum FontLoadError {
     /// Norad can currently only open UFO (directory) packages.
     #[error("only UFO (directory) packages are supported")]
     UfoNotADir,
+    /// An error returned by a [`crate::FontSource`] while reading data.
+    #[error("failed to read '{path}' from source")]
+    Source {
+        /// The path that failed.
+        path: PathBuf,
+        /// The underlying error.
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
+    /// An included feature file could not be found.
+    #[error("cannot find included feature file '{path}'")]
+    MissingIncludedFeatureFile {
+        /// The path to the missing include.
+        path: PathBuf,
+    },
+    /// A cycle was detected in feature file includes.
+    #[error("cycle detected in feature file includes at '{path}'")]
+    FeatureIncludeCycle {
+        /// The path where the cycle was detected.
+        path: PathBuf,
+    },
+    /// The UFO source uses an unsupported format version.
+    #[error("the UFO source uses an unsupported format version")]
+    SourceUnsupportedFormatVersion,
 }
 
 /// An error that occurs while attempting to read a UFO layer from disk.
@@ -460,6 +483,14 @@ pub enum FontWriteError {
     /// There exists a `public.objectLibs` lib key when it should be set only by norad.
     #[error("the `public.objectLibs` lib key is managed by norad and must not be set manually")]
     PreexistingPublicObjectLibsKey,
+    /// An error returned by a [`crate::FontSink`] while writing data.
+    #[error("failed to write '{path}' to sink")]
+    Sink {
+        /// The path that failed.
+        path: PathBuf,
+        /// The underlying error.
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
 }
 
 /// An error that occurs while attempting to read a UFO layer from disk.
@@ -482,6 +513,14 @@ pub enum LayerWriteError {
     /// Failed to write out the layerinfo.plist file
     #[error("failed to write layerinfo.plist file")]
     LayerInfo(#[source] CustomSerializationError),
+    /// An error returned by a [`crate::FontSink`] while writing layer data.
+    #[error("failed to write layer file '{path}' to sink")]
+    Sink {
+        /// The path that failed.
+        path: PathBuf,
+        /// The underlying error.
+        source: Box<dyn std::error::Error + Send + Sync + 'static>,
+    },
 }
 
 /// An error when attempting to write a .glif file.

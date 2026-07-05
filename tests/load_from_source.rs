@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use norad::{DataRequest, Font, FontSource};
+use norad::{DataRequest, Font, FontSink, FontSource, WriteOptions};
 
 /// A simple in-memory source that wraps a HashMap.
 struct MemorySource(HashMap<PathBuf, Vec<u8>>);
@@ -92,4 +92,141 @@ fn load_from_source_missing_metainfo() {
     let source = MemorySource(HashMap::new());
     let result = Font::load_from_source(&DataRequest::all(), &source);
     assert!(result.is_err());
+}
+
+/// A simple in-memory sink that collects files into a BTreeMap.
+struct MemorySink(std::collections::BTreeMap<PathBuf, Vec<u8>>);
+
+impl FontSink for MemorySink {
+    type Error = io::Error;
+    fn write(&mut self, path: &Path, data: &[u8]) -> Result<(), Self::Error> {
+        self.0.insert(path.to_path_buf(), data.to_vec());
+        Ok(())
+    }
+}
+
+#[test]
+fn save_with_sink_round_trips() {
+    let ufo_path = "testdata/MutatorSansLightWide.ufo";
+    let source = source_from_ufo_dir(ufo_path);
+    let font = Font::load_from_source(&DataRequest::all(), &source).unwrap();
+
+    let mut sink = MemorySink(Default::default());
+    font.save_with_sink(&WriteOptions::default(), &mut sink).unwrap();
+
+    // Every core file should be present in the sink output.
+    assert!(sink.0.contains_key(Path::new("metainfo.plist")));
+    assert!(sink.0.contains_key(Path::new("layercontents.plist")));
+    assert!(sink.0.contains_key(Path::new("glyphs/contents.plist")));
+
+    // Reload from the sink output and verify the round-trip.
+    let reload_map: HashMap<PathBuf, Vec<u8>> = sink.0.into_iter().collect();
+    let reload_source = MemorySource(reload_map);
+    let reloaded = Font::load_from_source(&DataRequest::all(), &reload_source).unwrap();
+
+    assert_eq!(font.font_info, reloaded.font_info);
+    assert_eq!(font.lib, reloaded.lib);
+    assert_eq!(font.groups, reloaded.groups);
+    assert_eq!(font.kerning, reloaded.kerning);
+    assert_eq!(font.features, reloaded.features);
+    assert_eq!(font.glyph_count(), reloaded.glyph_count());
+    // Note: metainfo creator is normalized to org.linebender.norad on save
+    // when it was already org.linebender.norad, or reset to default otherwise.
+    assert_eq!(reloaded.meta.format_version, font.meta.format_version);
+}
+
+#[test]
+fn structured_feature_files_load_and_expand() {
+    let mut entries: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+    entries.insert(
+        PathBuf::from("metainfo.plist"),
+        br#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>creator</key>
+    <string>org.linebender.norad</string>
+    <key>formatVersion</key>
+    <integer>3</integer>
+</dict>
+</plist>"#
+            .to_vec(),
+    );
+    entries.insert(
+        PathBuf::from("features.fea"),
+        b"languagesystem DFLT dflt;\ninclude( includes/shared.fea );\nfeature liga {\n    sub A A by A;\n} liga;\n".to_vec(),
+    );
+    entries.insert(
+        PathBuf::from("includes/shared.fea"),
+        b"@shared = [A];\n".to_vec(),
+    );
+    entries.insert(
+        PathBuf::from("layercontents.plist"),
+        br#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array>
+    <array>
+        <string>public.default</string>
+        <string>glyphs</string>
+    </array>
+</array>
+</plist>"#
+            .to_vec(),
+    );
+    entries.insert(
+        PathBuf::from("glyphs/contents.plist"),
+        br#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>A</key>
+    <string>A_.glif</string>
+</dict>
+</plist>"#
+            .to_vec(),
+    );
+    entries.insert(
+        PathBuf::from("glyphs/A_.glif"),
+        br#"<?xml version="1.0" encoding="UTF-8"?>
+<glyph name="A" format="2">
+  <advance width="500"/>
+</glyph>"#
+            .to_vec(),
+    );
+
+    let source = MemorySource(entries);
+    let font = Font::load_from_source(&DataRequest::all(), &source).unwrap();
+
+    // The main feature text should be loaded as-is.
+    assert_eq!(
+        font.features,
+        "languagesystem DFLT dflt;\ninclude( includes/shared.fea );\nfeature liga {\n    sub A A by A;\n} liga;\n"
+    );
+    // The included file should be in feature_files.
+    assert_eq!(
+        font.feature_files.get(Path::new("includes/shared.fea")),
+        Some(&"@shared = [A];\n".to_string())
+    );
+    // features_expanded should inline the include.
+    assert_eq!(
+        font.features_expanded().unwrap(),
+        "languagesystem DFLT dflt;\n@shared = [A];\nfeature liga {\n    sub A A by A;\n} liga;\n"
+    );
+
+    // Round-trip through a sink.
+    let mut sink = MemorySink(Default::default());
+    font.save_with_sink(&WriteOptions::default(), &mut sink).unwrap();
+
+    // Both features.fea and the included file should be written.
+    assert!(sink.0.contains_key(Path::new("features.fea")));
+    assert!(sink.0.contains_key(Path::new("includes/shared.fea")));
+
+    // Reload and verify.
+    let reload_map: HashMap<PathBuf, Vec<u8>> = sink.0.into_iter().collect();
+    let reload_source = MemorySource(reload_map);
+    let reloaded = Font::load_from_source(&DataRequest::all(), &reload_source).unwrap();
+    assert_eq!(reloaded.features, font.features);
+    assert_eq!(reloaded.feature_files, font.feature_files);
+    assert_eq!(reloaded.features_expanded().unwrap(), font.features_expanded().unwrap());
 }

@@ -2,6 +2,7 @@
 
 #![deny(rustdoc::broken_intra_doc_links)]
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::{fs, iter};
@@ -28,13 +29,13 @@ use crate::upconversion;
 use crate::write::{self, WriteOptions};
 use crate::DataRequest;
 
-static METAINFO_FILE: &str = "metainfo.plist";
-static FONTINFO_FILE: &str = "fontinfo.plist";
+pub(crate) static METAINFO_FILE: &str = "metainfo.plist";
+pub(crate) static FONTINFO_FILE: &str = "fontinfo.plist";
 pub(crate) static LIB_FILE: &str = "lib.plist";
-static GROUPS_FILE: &str = "groups.plist";
-static KERNING_FILE: &str = "kerning.plist";
-static FEATURES_FILE: &str = "features.fea";
-static DEFAULT_METAINFO_CREATOR: &str = "org.linebender.norad";
+pub(crate) static GROUPS_FILE: &str = "groups.plist";
+pub(crate) static KERNING_FILE: &str = "kerning.plist";
+pub(crate) static FEATURES_FILE: &str = "features.fea";
+pub(crate) static DEFAULT_METAINFO_CREATOR: &str = "org.linebender.norad";
 pub(crate) static DATA_DIR: &str = "data";
 pub(crate) static IMAGES_DIR: &str = "images";
 
@@ -86,6 +87,18 @@ pub struct Font {
     ///
     /// [fea]: https://unifiedfontobject.org/versions/ufo3/features.fea/
     pub features: String,
+    /// Structured feature files included via `include()` directives in
+    /// [`Font::features`].
+    ///
+    /// This map is populated by [`Font::load_from_source`] when the source
+    /// contains feature files that are `include()`-d from `features.fea`.
+    /// The keys are virtual paths relative to the UFO root (e.g.
+    /// `"features/includes/shared.fea"`) and the values are the raw file
+    /// contents.
+    ///
+    /// Use [`Font::features_expanded`] to get a single flattened string with
+    /// all includes inlined.
+    pub feature_files: BTreeMap<PathBuf, String>,
     /// The contents of the font's [`data` directory][dir].
     ///
     /// [dir]: https://unifiedfontobject.org/versions/ufo3/data/
@@ -300,21 +313,13 @@ impl Font {
         };
 
         let features_path = Path::new(FEATURES_FILE);
-        let mut features = if request.features {
-            match source.try_read(features_path) {
-                Some(data) => {
-                    let data = data.map_err(FontLoadError::FeatureFile)?;
-                    String::from_utf8(data).map_err(|e| {
-                        FontLoadError::FeatureFile(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            e,
-                        ))
-                    })?
-                }
-                None => Default::default(),
+        let (mut features, feature_files) = if request.features {
+            match crate::non_file_io::load_feature_files(source, features_path)? {
+                Some((main, included)) => (main, included),
+                None => (String::new(), BTreeMap::new()),
             }
         } else {
-            Default::default()
+            (String::new(), BTreeMap::new())
         };
 
         let layers = load_layer_set(source, &meta, &request.layers)?;
@@ -376,6 +381,7 @@ impl Font {
             groups: groups.unwrap_or_default(),
             kerning: kerning.unwrap_or_default(),
             features,
+            feature_files,
             data,
             images,
         })
@@ -653,6 +659,48 @@ impl Font {
         }
 
         Ok(())
+    }
+
+    /// Serialize a [`Font`] to a [`FontSink`], providing custom options.
+    ///
+    /// This is the sink-based counterpart to [`Font::load_from_source`]. It
+    /// writes all UFO files to the sink as `(relative_path, bytes)` pairs,
+    /// without touching the filesystem.
+    ///
+    /// Structured feature files (stored in [`Font::feature_files`]) are
+    /// written alongside `features.fea`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use std::collections::BTreeMap;
+    /// # use std::path::Path;
+    /// # use norad::{Font, WriteOptions};
+    /// # let font = Font::default();
+    /// let opts = WriteOptions::default();
+    /// let mut written: BTreeMap<std::path::PathBuf, Vec<u8>> = BTreeMap::new();
+    /// let mut sink = |path: &Path, data: &[u8]| -> Result<(), std::io::Error> {
+    ///     written.insert(path.to_path_buf(), data.to_vec());
+    ///     Ok(())
+    /// };
+    /// font.save_with_sink(&opts, &mut sink).unwrap();
+    /// ```
+    pub fn save_with_sink<S: crate::font_sink::FontSink>(
+        &self,
+        options: &WriteOptions,
+        sink: &mut S,
+    ) -> Result<(), FontWriteError> {
+        crate::non_file_io::save_font_with_sink(self, options, sink)
+    }
+
+    /// Expand `include()` directives in [`Font::features`] using the
+    /// [`Font::feature_files`] map.
+    ///
+    /// This produces a single flattened feature text with all includes
+    /// inlined. Returns an error if a cycle is detected or an included
+    /// file is missing from `feature_files`.
+    pub fn features_expanded(&self) -> Result<String, FontLoadError> {
+        crate::non_file_io::expand_feature_text(&self.features, &self.feature_files)
     }
 
     /// Returns a reference to the default layer.

@@ -18,6 +18,7 @@ mod identifier;
 pub mod kerning;
 mod layer;
 mod name;
+mod non_file_io;
 mod serde_xml_plist;
 mod shared_types;
 mod upconversion;
