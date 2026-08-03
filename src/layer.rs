@@ -466,8 +466,8 @@ impl Layer {
 
         util::recursive_sort_plist_keys(&mut dict);
 
-        let bytes = crate::write::write_xml_to_bytes(&dict, options)
-            .map_err(LayerWriteError::LayerInfo)?;
+        let bytes =
+            crate::write::write_xml_to_bytes(&dict, options).map_err(LayerWriteError::LayerInfo)?;
         Ok(Some(bytes))
     }
 
@@ -484,36 +484,31 @@ impl Layer {
         let contents_path = path.join(CONTENTS_FILE);
         let contents_xml = crate::write::write_xml_to_bytes(&self.contents, opts)
             .map_err(LayerWriteError::Contents)?;
-        sink.write(&contents_path, &contents_xml)
-            .map_err(|source| LayerWriteError::Sink {
-                path: contents_path.clone(),
-                source: Box::new(source),
-            })?;
+        sink.write(&contents_path, &contents_xml).map_err(|source| LayerWriteError::Sink {
+            path: contents_path.clone(),
+            source: Box::new(source),
+        })?;
 
         if let Some(layerinfo_xml) = self.layerinfo_to_bytes_if_needed(opts)? {
             let layerinfo_path = path.join(LAYER_INFO_FILE);
-            sink.write(&layerinfo_path, &layerinfo_xml)
-                .map_err(|source| LayerWriteError::Sink {
-                    path: layerinfo_path.clone(),
-                    source: Box::new(source),
-                })?;
+            sink.write(&layerinfo_path, &layerinfo_xml).map_err(|source| {
+                LayerWriteError::Sink { path: layerinfo_path.clone(), source: Box::new(source) }
+            })?;
         }
 
         for (name, glyph_rel_path) in &self.contents {
             let glyph = self.glyphs.get(name).expect("all glyphs in contents must exist.");
             let glyph_path = path.join(glyph_rel_path);
-            let glyph_xml = glyph
-                .encode_xml_with_options(opts)
-                .map_err(|source| LayerWriteError::Glyph {
+            let glyph_xml =
+                glyph.encode_xml_with_options(opts).map_err(|source| LayerWriteError::Glyph {
                     name: glyph.name.to_string(),
                     path: glyph_path.clone(),
                     source,
                 })?;
-            sink.write(&glyph_path, &glyph_xml)
-                .map_err(|source| LayerWriteError::Sink {
-                    path: glyph_path.clone(),
-                    source: Box::new(source),
-                })?;
+            sink.write(&glyph_path, &glyph_xml).map_err(|source| LayerWriteError::Sink {
+                path: glyph_path.clone(),
+                source: Box::new(source),
+            })?;
         }
 
         Ok(())

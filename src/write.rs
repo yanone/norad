@@ -154,6 +154,14 @@ pub(crate) fn serialize_xml(
     Ok(buf)
 }
 
+/// Backwards-compatible name for serializing a plist to an in-memory buffer.
+pub(crate) fn write_xml_to_bytes(
+    value: &impl serde::Serialize,
+    options: &WriteOptions,
+) -> Result<Vec<u8>, CustomSerializationError> {
+    serialize_xml(value, options)
+}
+
 /// Dump any `Serialize` to an XML plist and write it to the sink.
 pub(crate) fn write_xml_to_sink(
     sink: &dyn FontSink,

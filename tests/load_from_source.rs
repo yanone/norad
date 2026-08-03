@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use norad::{DataRequest, Font, FontSink, FontSource, WriteOptions};
 
@@ -95,12 +96,11 @@ fn load_from_source_missing_metainfo() {
 }
 
 /// A simple in-memory sink that collects files into a BTreeMap.
-struct MemorySink(std::collections::BTreeMap<PathBuf, Vec<u8>>);
+struct MemorySink(Mutex<std::collections::BTreeMap<PathBuf, Vec<u8>>>);
 
 impl FontSink for MemorySink {
-    type Error = io::Error;
-    fn write(&mut self, path: &Path, data: &[u8]) -> Result<(), Self::Error> {
-        self.0.insert(path.to_path_buf(), data.to_vec());
+    fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+        self.0.lock().unwrap().insert(path.to_path_buf(), data.to_vec());
         Ok(())
     }
 }
@@ -111,16 +111,17 @@ fn save_with_sink_round_trips() {
     let source = source_from_ufo_dir(ufo_path);
     let font = Font::load_from_source(&DataRequest::all(), &source).unwrap();
 
-    let mut sink = MemorySink(Default::default());
+    let mut sink = MemorySink(Mutex::new(Default::default()));
     font.save_with_sink(&WriteOptions::default(), &mut sink).unwrap();
 
     // Every core file should be present in the sink output.
-    assert!(sink.0.contains_key(Path::new("metainfo.plist")));
-    assert!(sink.0.contains_key(Path::new("layercontents.plist")));
-    assert!(sink.0.contains_key(Path::new("glyphs/contents.plist")));
+    let files = sink.0.into_inner().unwrap();
+    assert!(files.contains_key(Path::new("metainfo.plist")));
+    assert!(files.contains_key(Path::new("layercontents.plist")));
+    assert!(files.contains_key(Path::new("glyphs/contents.plist")));
 
     // Reload from the sink output and verify the round-trip.
-    let reload_map: HashMap<PathBuf, Vec<u8>> = sink.0.into_iter().collect();
+    let reload_map: HashMap<PathBuf, Vec<u8>> = files.into_iter().collect();
     let reload_source = MemorySource(reload_map);
     let reloaded = Font::load_from_source(&DataRequest::all(), &reload_source).unwrap();
 
@@ -156,10 +157,7 @@ fn structured_feature_files_load_and_expand() {
         PathBuf::from("features.fea"),
         b"languagesystem DFLT dflt;\ninclude( includes/shared.fea );\nfeature liga {\n    sub A A by A;\n} liga;\n".to_vec(),
     );
-    entries.insert(
-        PathBuf::from("includes/shared.fea"),
-        b"@shared = [A];\n".to_vec(),
-    );
+    entries.insert(PathBuf::from("includes/shared.fea"), b"@shared = [A];\n".to_vec());
     entries.insert(
         PathBuf::from("layercontents.plist"),
         br#"<?xml version="1.0" encoding="UTF-8"?>
@@ -215,15 +213,16 @@ fn structured_feature_files_load_and_expand() {
     );
 
     // Round-trip through a sink.
-    let mut sink = MemorySink(Default::default());
+    let mut sink = MemorySink(Mutex::new(Default::default()));
     font.save_with_sink(&WriteOptions::default(), &mut sink).unwrap();
 
     // Both features.fea and the included file should be written.
-    assert!(sink.0.contains_key(Path::new("features.fea")));
-    assert!(sink.0.contains_key(Path::new("includes/shared.fea")));
+    let files = sink.0.into_inner().unwrap();
+    assert!(files.contains_key(Path::new("features.fea")));
+    assert!(files.contains_key(Path::new("includes/shared.fea")));
 
     // Reload and verify.
-    let reload_map: HashMap<PathBuf, Vec<u8>> = sink.0.into_iter().collect();
+    let reload_map: HashMap<PathBuf, Vec<u8>> = files.into_iter().collect();
     let reload_source = MemorySource(reload_map);
     let reloaded = Font::load_from_source(&DataRequest::all(), &reload_source).unwrap();
     assert_eq!(reloaded.features, font.features);

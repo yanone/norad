@@ -16,11 +16,11 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
 use crate::error::{FontLoadError, FontWriteError};
-use crate::font_sink::FontSink;
 use crate::font::{
     Font, FormatVersion, MetaInfo, DATA_DIR, DEFAULT_METAINFO_CREATOR, FEATURES_FILE,
     FONTINFO_FILE, GROUPS_FILE, IMAGES_DIR, KERNING_FILE, LIB_FILE, METAINFO_FILE,
 };
+use crate::font_sink::FontSink;
 use crate::font_source::FontSource;
 use crate::groups::validate_groups;
 use crate::layer::LAYER_CONTENTS_FILE;
@@ -78,10 +78,7 @@ fn collect_feature_includes(
             })?;
             let include_data = include_data.map_err(FontLoadError::FeatureFile)?;
             let include_contents = String::from_utf8(include_data).map_err(|e| {
-                FontLoadError::FeatureFile(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    e,
-                ))
+                FontLoadError::FeatureFile(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
             })?;
 
             stack.insert(include_path.clone());
@@ -341,6 +338,8 @@ fn write_sink_file<S: FontSink>(
     path: &Path,
     bytes: &[u8],
 ) -> Result<(), FontWriteError> {
-    sink.write(path, bytes)
-        .map_err(|source| FontWriteError::Sink { path: path.to_path_buf(), source: Box::new(source) })
+    sink.write(path, bytes).map_err(|source| FontWriteError::Sink {
+        path: path.to_path_buf(),
+        source: Box::new(source),
+    })
 }
